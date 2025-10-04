@@ -18,6 +18,7 @@ An agent‑based grounded‑theory analysis tool with per‑coder agents and an 
 - UI: open `http://localhost:5000`
 - Provide:
   - OpenAI API key (required)
+  - OpenAI API tier (Tier 1–5 selector in the UI). Check your tier at https://platform.openai.com/settings/organization/limits — higher tiers unlock higher parallelism.
   - Study background, transcripts (.txt/.pdf/.docx), coders, analysis mode, optional CAC
   - Optionally click “Refine Text” to preview polished background/framework before running
 

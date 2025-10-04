@@ -71,6 +71,10 @@ def _enforce_word_limit(text: str, limit: int) -> str:
 
 @app.route("/")
 def index() -> str:
+    tier_rows = [
+        {"tier": tier, "summary": data["summary"], "open": data["open"]}
+        for tier, data in sorted(config.TIER_CONCURRENCY_PRESET.items())
+    ]
     return render_template(
         "index.html",
         default_model=config.DEFAULT_MODEL,
@@ -78,6 +82,9 @@ def index() -> str:
         default_segment_len=config.SEGMENT_LENGTH_DEFAULT,
         segment_length_options=getattr(config, "SEGMENT_LENGTH_OPTIONS", [config.SEGMENT_LENGTH_DEFAULT]),
         default_max_categories=config.MAX_CATEGORIES_DEFAULT,
+        default_api_tier=config.DEFAULT_API_TIER,
+        api_tier_options=config.API_TIER_OPTIONS,
+        api_tier_rows=tier_rows,
     )
 
 
@@ -106,6 +113,10 @@ def start() -> str:
         segment_len = config.SEGMENT_LENGTH_DEFAULT
     model = request.form.get("model", config.DEFAULT_MODEL).strip()
     api_key = request.form.get("openai_api_key", "").strip()
+    api_tier = _safe_int(request.form.get("api_tier"), config.DEFAULT_API_TIER)
+    if api_tier not in config.API_TIER_OPTIONS:
+        api_tier = config.DEFAULT_API_TIER
+    tier_settings = config.concurrency_for_tier(api_tier)
 
     # Create run directory
     base = Path(__file__).parent / config.OUTPUT_DIR
@@ -144,6 +155,9 @@ def start() -> str:
         "segment_length": segment_len,
         "model": model,
         "uploads": uploads,
+        "api_tier": tier_settings["tier"],
+        "summary_concurrency": tier_settings["summary"],
+        "open_coding_concurrency": tier_settings["open"],
     }
     # Persist the API key separately and do not include it in params.json
     (run_dir / "params.json").write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")

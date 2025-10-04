@@ -23,6 +23,15 @@
             <div class="help">Required to run this analysis.</div>
           </div>
           <div class="field">
+            <label for="api_tier">OpenAI API Tier</label>
+            <select id="api_tier" name="api_tier">
+              {% for tier in api_tier_options %}
+                <option value="{{ tier }}" {% if tier == default_api_tier %}selected{% endif %}>Tier {{ tier }}</option>
+              {% endfor %}
+            </select>
+            <div class="help">Check your tier at <a href="https://platform.openai.com/settings/organization/limits" target="_blank" rel="noopener noreferrer">OpenAI dashboard</a>. Higher tiers enable faster runs.</div>
+          </div>
+          <div class="field">
             <label for="transcripts">Transcripts (.txt, .pdf, .docx)</label>
             <input type="file" id="transcripts" name="transcripts" accept=".txt,.pdf,.docx" multiple required />
             <div class="help">Upload one file per interview or focus group.</div>
@@ -30,8 +39,8 @@
           <div class="field">
             <label for="coders">Coders</label>
             <select id="coders" name="coders">
-              <option value="1" selected>1</option>
-              <option value="2">2</option>
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
             </select>
             <div class="help">Choose either a single coder run or a two-coder comparison.</div>
           </div>

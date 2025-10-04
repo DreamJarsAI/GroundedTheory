@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from datetime import datetime
@@ -45,6 +46,34 @@ def _log(run_dir: Path, msg: str) -> None:
         f.write(f"[{ts}] {msg}\n")
 
 
+async def _run_sync_tasks(callables: List[Any], limit: int) -> Tuple[List[Any], List[Exception | None]]:
+    """Run blocking callables concurrently with a semaphore limiting concurrency."""
+    max_workers = max(1, int(limit) if isinstance(limit, int) else 1)
+    sem = asyncio.Semaphore(max_workers)
+    results: List[Any] = [None] * len(callables)
+    errors: List[Exception | None] = [None] * len(callables)
+
+    async def _runner(idx: int, fn: Any) -> None:
+        async with sem:
+            try:
+                results[idx] = await asyncio.to_thread(fn)
+            except Exception as exc:  # pragma: no cover - diagnostic logging handles visibility
+                errors[idx] = exc
+
+    await asyncio.gather(*(_runner(i, fn) for i, fn in enumerate(callables)))
+    return results, errors
+
+
+def _resolve_positive_int(value: Any, fallback: int) -> int:
+    try:
+        candidate = int(value)
+        if candidate > 0:
+            return candidate
+    except Exception:
+        pass
+    return fallback
+
+
 def run_job(run_dir: Path) -> None:
     try:
         params = json.loads((run_dir / "params.json").read_text(encoding="utf-8"))
@@ -59,6 +88,9 @@ def run_job(run_dir: Path) -> None:
     max_categories = int(params.get("max_categories", config.MAX_CATEGORIES_DEFAULT))
     segment_len = int(params.get("segment_length", config.SEGMENT_LENGTH_DEFAULT))
     model = params.get("model", config.DEFAULT_MODEL)
+    tier_info = config.concurrency_for_tier(params.get("api_tier"))
+    summary_concurrency = _resolve_positive_int(params.get("summary_concurrency"), tier_info["summary"])
+    open_coding_concurrency = _resolve_positive_int(params.get("open_coding_concurrency"), tier_info["open"])
 
     run_id = run_dir.name[4:] if run_dir.name.startswith("run_") else run_dir.name
     api_key_path = run_dir.parent / "_secrets" / f"{run_id}.secret"
@@ -82,6 +114,7 @@ def run_job(run_dir: Path) -> None:
         return
     sdk = AgentSDK(model=model, api_key=api_key)
     _log(run_dir, f"Agent SDK initialized | model={model} | key_present={'yes' if api_key else 'no'}")
+    _log(run_dir, f"Concurrency | tier={tier_info['tier']} | summaries={summary_concurrency} | open_coding={open_coding_concurrency}")
 
 
     # Connectivity sanity check
@@ -165,19 +198,52 @@ def run_job(run_dir: Path) -> None:
     by_key_map, _ = build_segment_maps(all_segments)
 
     # Build comprehensive per-transcript summaries (multi-paragraph) for use in axial and selective coding (obligatory)
-    transcript_summaries: Dict[str, str] = {}
+    transcript_summaries: Dict[str, str] = {name: "" for name in transcript_raw.keys()}
     try:
         try:
             from .agents.coder_agent import summarize_transcript  # package import
         except Exception:
             from agents.coder_agent import summarize_transcript  # top-level import
-        _log(run_dir, "Generating comprehensive transcript summaries...")
-        for name, text in transcript_raw.items():
-            if (text or "").strip():
-                summary = summarize_transcript(sdk=sdk, transcript_name=name, text=text, attempts=1, timeout_s=240.0)
-                transcript_summaries[name] = summary
-            else:
-                transcript_summaries[name] = ""
+
+        non_empty_transcripts = [
+            (name, text)
+            for name, text in transcript_raw.items()
+            if (text or "").strip()
+        ]
+
+        if non_empty_transcripts:
+            _log(run_dir, "Generating comprehensive transcript summaries (parallel)...")
+            summary_limit = summary_concurrency
+
+            def _make_summary_callable(name: str, text: str):
+                def _call() -> Tuple[str, str]:
+                    local_sdk = AgentSDK(model=model, api_key=api_key)
+                    summary = summarize_transcript(
+                        sdk=local_sdk,
+                        transcript_name=name,
+                        text=text,
+                        attempts=1,
+                        timeout_s=240.0,
+                    )
+                    return name, summary
+
+                return _call
+
+            callables = [_make_summary_callable(name, text) for name, text in non_empty_transcripts]
+            results, errors = asyncio.run(_run_sync_tasks(callables, summary_limit))
+
+            for (name, _), err in zip(non_empty_transcripts, errors):
+                if err:
+                    _log(run_dir, f"Warning: transcript summary for {name} failed: {err}")
+
+            for item in results:
+                if not item:
+                    continue
+                name, summary = item
+                if name in transcript_summaries:
+                    transcript_summaries[name] = summary
+        else:
+            _log(run_dir, "Skipping transcript summaries; inputs empty.")
     except Exception as e:
         _log(run_dir, f"Warning: transcript summaries failed: {e}")
         transcript_summaries = {name: "" for name in transcript_raw.keys()}
@@ -231,69 +297,99 @@ def run_job(run_dir: Path) -> None:
 
     for i in range(1, coders + 1):
         coder_id = f"coder{i}"
-        _log(run_dir, f"[{coder_id}] Open coding (sequential segments)...")
         oc_block_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
         chunk_size = 1
         chunks = _iter_chunks(all_segments, chunk_size) if all_segments else []
-        diag_msg: str | None = None
-        for idx, chunk in enumerate(chunks, start=1):
-            chunk_summaries = {
-                str(seg.get("transcript")): transcript_summaries.get(str(seg.get("transcript")), "")
-                for seg in chunk
-                if transcript_summaries.get(str(seg.get("transcript")), "").strip()
-            }
-            seg_info = chunk[0] if chunk else {}
-            seg_label = f"{seg_info.get('transcript','')}#{seg_info.get('segment_number','')}" if seg_info else "?"
-            _log(run_dir, f"[{coder_id}] Segment {idx}/{len(chunks)} | {seg_label}")
-            chunk_blocks: List[Dict[str, Any]] = []
-            for attempt in range(2):
-                chunk_blocks = run_open_coding(
-                    sdk=sdk,
-                    segments=chunk,
-                    study_background=study_background,
-                    analysis_mode=analysis_mode,
-                    theoretical_framework=theoretical_framework,
-                    transcript_summaries=chunk_summaries,
-                    attempts=2,
-                    timeout_s=150.0,
-                )
-                chunk_blocks = _normalize_open_blocks(chunk_blocks)
-                diag_info = sdk.diagnostics() or {}
-                diag_msg = diag_info.get("last_error")
-                diag_raw = diag_info.get("last_raw")
-                if chunk_blocks and _has_codes(chunk_blocks):
-                    break
-                if diag_msg or diag_raw:
-                    msg = diag_msg or "no explicit error"
-                    if diag_raw:
-                        msg += f" | raw={diag_raw}"
-                    _log(run_dir, f"[{coder_id}] Chunk {idx} warning: {msg}")
-                if attempt < 1:
-                    _log(run_dir, f"[{coder_id}] Retrying chunk {idx}...")
-            if not chunk_blocks:
-                diag_info = sdk.diagnostics() or {}
-                diag_msg = diag_info.get("last_error")
-                diag_raw = diag_info.get("last_raw")
-                if diag_msg or diag_raw:
-                    msg = diag_msg or "no explicit error"
-                    if diag_raw:
-                        msg += f" | raw={diag_raw}"
-                    _log(run_dir, f"[{coder_id}] Chunk {idx} produced no usable codes: {msg}")
-            expected_tx = seg_info.get("transcript") if isinstance(seg_info, dict) else None
-            expected_num = seg_info.get("segment_number") if isinstance(seg_info, dict) else None
-            for block in chunk_blocks or []:
-                if expected_tx is not None:
-                    block["transcript"] = expected_tx
-                if expected_num is not None:
-                    block["segment_number"] = expected_num
-                key = _segment_key(block)
-                if key not in oc_block_map or not oc_block_map[key].get("codes"):
-                    oc_block_map[key] = block
+        total_chunks = len(chunks)
+        open_concurrency = max(1, int(open_coding_concurrency))
+
+        if total_chunks == 0:
+            _log(run_dir, f"[{coder_id}] No segments available for open coding.")
+        else:
+            _log(run_dir, f"[{coder_id}] Open coding (parallel segments; concurrency={open_concurrency})...")
+
+            def _make_open_callable(idx: int, chunk: List[Dict[str, Any]]):
+                seg_info = chunk[0] if chunk else {}
+                seg_label = f"{seg_info.get('transcript','')}#{seg_info.get('segment_number','')}" if seg_info else "?"
+                order = idx + 1
+
+                def _call() -> Dict[str, Any]:
+                    local_sdk = AgentSDK(model=model, api_key=api_key)
+                    local_chunk_summaries = {
+                        str(seg.get("transcript")): transcript_summaries.get(str(seg.get("transcript")), "")
+                        for seg in chunk
+                        if transcript_summaries.get(str(seg.get("transcript")), "").strip()
+                    }
+                    _log(run_dir, f"[{coder_id}] Segment {order}/{total_chunks} | {seg_label}")
+                    chunk_blocks: List[Dict[str, Any]] = []
+                    for attempt in range(2):
+                        chunk_blocks = run_open_coding(
+                            sdk=local_sdk,
+                            segments=chunk,
+                            study_background=study_background,
+                            analysis_mode=analysis_mode,
+                            theoretical_framework=theoretical_framework,
+                            transcript_summaries=local_chunk_summaries,
+                            attempts=2,
+                            timeout_s=150.0,
+                        )
+                        chunk_blocks = _normalize_open_blocks(chunk_blocks)
+                        diag_info = local_sdk.diagnostics() or {}
+                        diag_msg = diag_info.get("last_error")
+                        diag_raw = diag_info.get("last_raw")
+                        if chunk_blocks and _has_codes(chunk_blocks):
+                            break
+                        if diag_msg or diag_raw:
+                            msg = diag_msg or "no explicit error"
+                            if diag_raw:
+                                msg += f" | raw={diag_raw}"
+                            _log(run_dir, f"[{coder_id}] Chunk {order} warning: {msg}")
+                        if attempt < 1:
+                            _log(run_dir, f"[{coder_id}] Retrying chunk {order}...")
+                    if not chunk_blocks:
+                        diag_info = local_sdk.diagnostics() or {}
+                        diag_msg = diag_info.get("last_error")
+                        diag_raw = diag_info.get("last_raw")
+                        if diag_msg or diag_raw:
+                            msg = diag_msg or "no explicit error"
+                            if diag_raw:
+                                msg += f" | raw={diag_raw}"
+                            _log(run_dir, f"[{coder_id}] Chunk {order} produced no usable codes: {msg}")
+                    expected_tx = seg_info.get("transcript") if isinstance(seg_info, dict) else None
+                    expected_num = seg_info.get("segment_number") if isinstance(seg_info, dict) else None
+                    chunk_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
+                    for block in chunk_blocks or []:
+                        if expected_tx is not None:
+                            block["transcript"] = expected_tx
+                        if expected_num is not None:
+                            block["segment_number"] = expected_num
+                        key = _segment_key(block)
+                        if key not in chunk_map or not chunk_map[key].get("codes"):
+                            chunk_map[key] = block
+                    return {"map": chunk_map, "has_codes": bool(chunk_blocks) and _has_codes(chunk_blocks)}
+
+                return _call
+
+            callables = [_make_open_callable(idx, chunk) for idx, chunk in enumerate(chunks)]
+            if callables:
+                results, errors = asyncio.run(_run_sync_tasks(callables, open_concurrency))
+                for idx, err in enumerate(errors):
+                    if err:
+                        seg_info = chunks[idx][0] if idx < len(chunks) and chunks[idx] else {}
+                        seg_label = f"{seg_info.get('transcript','')}#{seg_info.get('segment_number','')}" if seg_info else "?"
+                        _log(run_dir, f"[{coder_id}] Chunk {idx + 1} ({seg_label}) raised error: {err}")
+                for item in results:
+                    if not item:
+                        continue
+                    chunk_map = item.get("map", {})
+                    for key, block in chunk_map.items():
+                        if key not in oc_block_map or not oc_block_map[key].get("codes"):
+                            oc_block_map[key] = block
+            else:
+                _log(run_dir, f"[{coder_id}] No chunks generated for open coding.")
 
         ordered_keys = [_segment_key(seg) for seg in all_segments]
         oc_blocks = [oc_block_map[key] for key in ordered_keys if key in oc_block_map]
-        if all_segments and not (oc_blocks and _has_codes(oc_blocks)) and diag_msg:
-            _log(run_dir, f"[{coder_id}] Open coding warning: {diag_msg}")
         # normalize to list of {code, transcript, segment_number}
         oc: List[Dict[str, Any]] = []
         for block in oc_blocks:
