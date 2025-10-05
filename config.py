@@ -35,9 +35,9 @@ REFINE_CONTEXT_ENABLED_DEFAULT = False
 # Concurrency controls (bounded via asyncio.Semaphore in worker)
 TIER_CONCURRENCY_PRESET = {
     1: {"summary": 2, "open": 12},
-    2: {"summary": 10, "open": 60},
-    3: {"summary": 60, "open": 350},
-    4: {"summary": 350, "open": 2000},
+    2: {"summary": 20, "open": 120},
+    3: {"summary": 40, "open": 250},
+    4: {"summary": 100, "open": 600},
     5: {"summary": 1800, "open": 9000},
 }
 
