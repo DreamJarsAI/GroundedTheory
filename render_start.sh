@@ -19,7 +19,7 @@ import importlib
 from pathlib import Path
 
 module = None
-for name in ("config", "grounded_theory_agent.config"):
+for name in ("config", "GroundedTheory.config"):
     try:
         module = importlib.import_module(name)
         break
@@ -36,7 +36,7 @@ PY
 APP_MODULE=$(python - <<'PY'
 import importlib.util
 
-for name in ("grounded_theory_agent.app", "app"):
+for name in ("GroundedTheory.app", "app"):
     try:
         spec = importlib.util.find_spec(name)
     except ModuleNotFoundError:

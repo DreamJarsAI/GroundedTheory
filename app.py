@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import List
 import threading
@@ -44,7 +44,7 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 
 
 def _append_progress_line(run_dir: Path, message: str) -> None:
-    ts = datetime.utcnow().strftime("%H:%M:%S")
+    ts = datetime.now(UTC).strftime("%H:%M:%S")
     with open(run_dir / "progress.log", "a", encoding="utf-8") as log:
         log.write(f"[{ts}] {message}\n")
 
@@ -121,7 +121,7 @@ def start() -> str:
     # Create run directory
     base = Path(__file__).parent / config.OUTPUT_DIR
     base.mkdir(parents=True, exist_ok=True)
-    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
     run_dir = base / f"run_{run_id}"
     inputs_dir = run_dir / "inputs"
     transcripts_dir = inputs_dir / "transcripts"
@@ -181,9 +181,9 @@ def start() -> str:
         try:
             import importlib
 
-            job_path = "grounded_theory_agent.worker_entry.run_queued_job"
+            job_path = "GroundedTheory.worker_entry.run_queued_job"
             try:
-                importlib.import_module("grounded_theory_agent.worker_entry")
+                importlib.import_module("GroundedTheory.worker_entry")
             except ModuleNotFoundError:
                 job_path = "worker_entry.run_queued_job"
 
