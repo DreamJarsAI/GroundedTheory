@@ -13,8 +13,8 @@ An agent‑based grounded‑theory analysis tool with per‑coder agents and an 
 - Academic‑style UI with progress log and downloadable outputs
 
 ## Quickstart
-- Install: `pip install -r grounded_theory_agent/requirements.txt`
-- Run: `PORT=5000 python -m grounded_theory_agent.app`
+- Install: `pip install -r GroundedTheory/requirements.txt`
+- Run: `PORT=5000 python -m GroundedTheory.app`
 - UI: open `http://localhost:5000`
 - Provide:
   - OpenAI API key (required)
@@ -38,7 +38,7 @@ An agent‑based grounded‑theory analysis tool with per‑coder agents and an 
 - Summary: `analysis_summary.txt`
 
 ## Configuration
-- Defaults: see `grounded_theory_agent/config.py` (model, segment length, RAG k, output dir)
+- Defaults: see `GroundedTheory/config.py` (model, segment length, RAG k, output dir)
 - API key: UI field (required) or env `OPENAI_API_KEY` for non-UI calls. Form-submitted keys are stored only in a transient secrets directory and removed once the worker starts (never written to downloadable outputs).
 - Port: default 5000 (override with `PORT`)
 

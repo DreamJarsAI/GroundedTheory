@@ -6,7 +6,7 @@ import sys
 import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, UTC
 import time
 import re
 
@@ -41,7 +41,7 @@ _cfg = config
 
 
 def _log(run_dir: Path, msg: str) -> None:
-    ts = datetime.utcnow().strftime("%H:%M:%S")
+    ts = datetime.now(UTC).strftime("%H:%M:%S")
     with open(run_dir / "progress.log", "a", encoding="utf-8") as f:
         f.write(f"[{ts}] {msg}\n")
 
